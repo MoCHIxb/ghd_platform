@@ -427,7 +427,7 @@ def add_file_permission(fid):
     if fp:
         fp.permission_type = perm_type
         fp.expire_at = expire_at
-        fp.granted_at = datetime.utcnow()
+        fp.granted_at = datetime.now()
     else:
         fp = FilePermission(
             file_id=fid,

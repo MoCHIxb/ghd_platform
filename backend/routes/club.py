@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from flask import Blueprint, current_app, jsonify, request, send_from_directory
@@ -10,7 +10,8 @@ from werkzeug.utils import secure_filename
 from extensions import db
 from models import (
     ActivityMedia, ActivityParticipant, ClubActivity, ClubArchive, Department,
-    Equipment, EquipmentCategory, EquipmentUsage, File, Role, SocialAccount, User,
+    Equipment, EquipmentCategory, EquipmentUsage, File, OperationRecord, Role,
+    SocialAccount, User,
 )
 from utils.auth_helper import get_current_user, require_auth
 
@@ -80,6 +81,25 @@ def _deny_unless(condition, message='权限不足'):
     return None if condition else (jsonify(msg=message), 403)
 
 
+def _record(user, module, action, target_type, target=None, target_name=None, detail=None):
+    """在当前事务中保存统一操作时间记录。"""
+    target_id = None
+    if target is not None:
+        target_id = getattr(target, f'{target_type}_id', None)
+        if target_id is None:
+            for key in ('activity_id', 'equipment_id', 'media_id', 'archive_id',
+                        'usage_id', 'category_id', 'account_id', 'participant_id'):
+                if hasattr(target, key):
+                    target_id = getattr(target, key)
+                    break
+    db.session.add(OperationRecord(
+        module=module, action=action, target_type=target_type,
+        target_id=target_id, target_name=target_name,
+        operator_id=user.user_id if user else None, detail=detail,
+        occurred_at=datetime.now(),
+    ))
+
+
 @club_bp.route('/departments', methods=['GET'])
 def departments():
     rows = Department.query.order_by(Department.sort_order).all()
@@ -100,7 +120,7 @@ def members():
 @club_bp.route('/overview', methods=['GET'])
 @require_auth
 def overview():
-    now = datetime.utcnow()
+    now = datetime.now()
     active_borrows = EquipmentUsage.query.filter_by(status='使用中').count()
     pending_media = ActivityMedia.query.filter_by(review_status='待审阅').count()
     upcoming = ClubActivity.query.filter(ClubActivity.start_time >= now).order_by(ClubActivity.start_time).limit(4).all()
@@ -113,6 +133,88 @@ def overview():
         pending_media=pending_media,
         upcoming=[a.to_dict() for a in upcoming],
     ), 200
+
+
+# ── 时间中心：日程与统一操作记录 ─────────────────────────────────────────────
+
+@club_bp.route('/time/overview', methods=['GET'])
+@require_auth
+def time_overview():
+    now = datetime.now()
+    try:
+        start = _parse_dt(request.args.get('start')) or now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = _parse_dt(request.args.get('end')) or (start.replace(hour=23, minute=59, second=59) + timedelta(days=30))
+    except ValueError:
+        return jsonify(msg='时间范围格式错误'), 400
+
+    events = []
+    activities = ClubActivity.query.filter(
+        ClubActivity.start_time >= start, ClubActivity.start_time <= end
+    ).order_by(ClubActivity.start_time).all()
+    for row in activities:
+        events.append({
+            'module': 'activity', 'event_type': '活动安排', 'target_id': row.activity_id,
+            'title': row.title, 'time': row.start_time.isoformat(),
+            'end_time': row.end_time.isoformat() if row.end_time else None,
+            'status': row.status, 'detail': f'{row.activity_type} · {row.location or "地点待定"}',
+            'is_overdue': bool(row.end_time and row.end_time < now and row.status != '已完成'),
+        })
+
+    usages = EquipmentUsage.query.filter(
+        EquipmentUsage.status == '使用中', EquipmentUsage.expected_return_at.isnot(None),
+        EquipmentUsage.expected_return_at >= start, EquipmentUsage.expected_return_at <= end,
+    ).order_by(EquipmentUsage.expected_return_at).all()
+    for row in usages:
+        events.append({
+            'module': 'equipment', 'event_type': '设备应归还', 'target_id': row.usage_id,
+            'title': f'{row.equipment.equipment_name} × {row.quantity}',
+            'time': row.expected_return_at.isoformat(), 'end_time': None,
+            'status': row.status, 'detail': f'领用人：{row.user.real_name or row.user.username}',
+            'is_overdue': row.expected_return_at < now,
+        })
+
+    pending_media = ActivityMedia.query.filter(
+        ActivityMedia.review_status == '待审阅', ActivityMedia.submitted_at <= end
+    ).order_by(ActivityMedia.submitted_at).all()
+    for row in pending_media:
+        if row.submitted_at >= start:
+            events.append({
+                'module': 'media', 'event_type': '素材待审', 'target_id': row.media_id,
+                'title': row.activity.title, 'time': row.submitted_at.isoformat(),
+                'end_time': None, 'status': row.review_status,
+                'detail': f'提交人：{row.submitter.real_name or row.submitter.username}',
+                'is_overdue': (now - row.submitted_at).days >= 3,
+            })
+
+    events.sort(key=lambda item: item['time'])
+    return jsonify(
+        start=start.isoformat(), end=end.isoformat(), events=events,
+        activity_count=len(activities),
+        return_due_count=len(usages),
+        pending_media_count=len(pending_media),
+        overdue_count=sum(1 for item in events if item['is_overdue']),
+    ), 200
+
+
+@club_bp.route('/time/records', methods=['GET'])
+@require_auth
+def time_records():
+    module = (request.args.get('module') or '').strip()
+    limit = min(max(request.args.get('limit', 50, type=int), 1), 200)
+    query = OperationRecord.query
+    if module:
+        query = query.filter_by(module=module)
+    try:
+        start = _parse_dt(request.args.get('start'))
+        end = _parse_dt(request.args.get('end'))
+    except ValueError:
+        return jsonify(msg='时间范围格式错误'), 400
+    if start:
+        query = query.filter(OperationRecord.occurred_at >= start)
+    if end:
+        query = query.filter(OperationRecord.occurred_at <= end)
+    rows = query.order_by(OperationRecord.occurred_at.desc()).limit(limit).all()
+    return jsonify(records=[row.to_dict() for row in rows]), 200
 
 
 # ── 教官部：活动项目 ─────────────────────────────────────────────────────────
@@ -160,6 +262,9 @@ def create_activity():
         cover_image=cover_image,
     )
     db.session.add(activity)
+    db.session.flush()
+    _record(user, 'activity', '创建活动', 'activity', activity, activity.title,
+            f'{activity.activity_type} · {activity.start_time.isoformat()}')
     db.session.commit()
     return jsonify(msg='活动项目已创建', activity=activity.to_dict()), 201
 
@@ -184,6 +289,8 @@ def transfer_activity(activity_id):
     if not target or target.status != 1:
         return jsonify(msg='目标用户不存在或已停用'), 404
     activity.lead_instructor_id = target.user_id
+    _record(user, 'activity', '移交主教官', 'activity', activity, activity.title,
+            f'新主教官：{target.real_name or target.username}')
     db.session.commit()
     return jsonify(msg='活动主教官已移交', activity=activity.to_dict()), 200
 
@@ -206,7 +313,7 @@ def update_participant(activity_id):
         db.session.add(row)
     if 'attendance_status' in data:
         row.attendance_status = data['attendance_status']
-        row.checked_at = datetime.utcnow()
+        row.checked_at = datetime.now()
     if 'score' in data:
         score = float(data['score'])
         if score < 0 or score > 100:
@@ -214,6 +321,10 @@ def update_participant(activity_id):
         row.score = score
     if 'performance_comment' in data:
         row.performance_comment = data['performance_comment']
+    db.session.flush()
+    _record(user, 'activity', '保存考勤评分', 'participant', row,
+            f'{activity.title} / {target.real_name or target.username}',
+            f'{row.attendance_status} · {float(row.score) if row.score is not None else "未评分"}')
     db.session.commit()
     return jsonify(msg='考勤与表现已记录', participant=row.to_dict()), 200
 
@@ -230,6 +341,8 @@ def update_summary(activity_id):
     activity.summary = (data.get('summary') or '').strip()
     if data.get('status'):
         activity.status = data['status']
+    _record(user, 'activity', '保存项目总结', 'activity', activity, activity.title,
+            f'项目状态：{activity.status}')
     db.session.commit()
     return jsonify(msg='项目总结已保存', activity=activity.to_dict()), 200
 
@@ -249,6 +362,9 @@ def submit_media(activity_id):
     row = ActivityMedia(activity_id=activity.activity_id, file_id=media_file.file_id,
                         submitter_id=user.user_id)
     db.session.add(row)
+    db.session.flush()
+    _record(user, 'media', '提交活动素材', 'media', row, activity.title,
+            media_file.original_name)
     db.session.commit()
     return jsonify(msg='素材已提交办公室审阅', media=row.to_dict()), 201
 
@@ -282,6 +398,8 @@ def equipment_categories():
     row = EquipmentCategory(category_name=name, description=data.get('description'),
                             parent_id=parent_id, sort_order=int(data.get('sort_order', 0)))
     db.session.add(row)
+    db.session.flush()
+    _record(user, 'equipment', '创建设备分类', 'category', row, row.full_name())
     db.session.commit()
     return jsonify(msg='设备分类已创建', category=row.to_dict()), 201
 
@@ -297,6 +415,7 @@ def manage_equipment_category(category_id):
     if request.method == 'DELETE':
         if row.children or row.equipment:
             return jsonify(msg='分类下仍有子分类或设备，不能删除'), 409
+        _record(user, 'equipment', '删除设备分类', 'category', row, row.full_name())
         db.session.delete(row)
         db.session.commit()
         return jsonify(msg='设备分类已删除'), 200
@@ -313,6 +432,7 @@ def manage_equipment_category(category_id):
             return jsonify(msg='分类不能成为自己的父分类'), 400
         row.parent_id = parent_id
     try:
+        _record(user, 'equipment', '更新设备分类', 'category', row, row.full_name())
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
@@ -346,6 +466,9 @@ def equipment_list():
     if not row.asset_code or not row.equipment_name or not EquipmentCategory.query.get(row.category_id):
         return jsonify(msg='资产编号、设备名称和有效分类均为必填项'), 400
     db.session.add(row)
+    db.session.flush()
+    _record(user, 'equipment', '登记设备', 'equipment', row, row.equipment_name,
+            f'资产编号：{row.asset_code} · 数量：{row.total_quantity}')
     db.session.commit()
     return jsonify(msg='设备已登记', equipment=row.to_dict()), 201
 
@@ -379,6 +502,9 @@ def borrow_equipment(equipment_id):
                          expected_return_at=expected, notes=data.get('notes'))
     equipment.available_quantity -= qty
     db.session.add(row)
+    db.session.flush()
+    _record(user, 'equipment', '领用设备', 'usage', row, equipment.equipment_name,
+            f'数量：{qty} · 预计归还：{expected.isoformat() if expected else "未设置"}')
     db.session.commit()
     return jsonify(msg='设备领用成功', usage=row.to_dict(), equipment=equipment.to_dict()), 201
 
@@ -394,9 +520,11 @@ def return_equipment(usage_id):
     if row.status != '使用中':
         return jsonify(msg='该记录已经归还'), 409
     row.status = '已归还'
-    row.returned_at = datetime.utcnow()
+    row.returned_at = datetime.now()
     row.equipment.available_quantity = min(row.equipment.total_quantity,
                                            row.equipment.available_quantity + row.quantity)
+    _record(user, 'equipment', '归还设备', 'usage', row, row.equipment.equipment_name,
+            f'归还数量：{row.quantity}')
     db.session.commit()
     return jsonify(msg='设备已归还', usage=row.to_dict()), 200
 
@@ -419,6 +547,9 @@ def socials():
     if not row.platform or not row.account_name or not row.link_url:
         return jsonify(msg='平台、账号名称和链接均不能为空'), 400
     db.session.add(row)
+    db.session.flush()
+    _record(user, 'office', '添加社媒账号', 'account', row, row.platform,
+            row.account_name)
     db.session.commit()
     return jsonify(msg='社媒账号已添加', account=row.to_dict()), 201
 
@@ -443,6 +574,9 @@ def archives():
     if not row.title:
         return jsonify(msg='档案标题不能为空'), 400
     db.session.add(row)
+    db.session.flush()
+    _record(user, 'archive', '保存文件档案', 'archive', row, row.title,
+            row.archive_type)
     db.session.commit()
     return jsonify(msg='文件已归档', archive=row.to_dict()), 201
 
@@ -469,6 +603,8 @@ def review_media(media_id):
     row.review_status = status
     row.review_comment = data.get('review_comment')
     row.reviewer_id = user.user_id
-    row.reviewed_at = datetime.utcnow()
+    row.reviewed_at = datetime.now()
+    _record(user, 'media', '审阅活动素材', 'media', row, row.activity.title,
+            f'{status} · {row.review_comment or "无审阅意见"}')
     db.session.commit()
     return jsonify(msg='素材审阅结果已保存', media=row.to_dict()), 200

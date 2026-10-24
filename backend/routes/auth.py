@@ -91,7 +91,7 @@ def login():
     if user.status == 0:
         return jsonify(msg='账号已被禁用，请联系管理员'), 403
 
-    user.last_login = datetime.utcnow()
+    user.last_login = datetime.now()
     db.session.commit()
 
     # PyJWT/Flask-JWT-Extended 新版本对 sub 类型更严格，使用字符串 identity 更稳妥

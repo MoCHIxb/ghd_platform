@@ -8,7 +8,7 @@ user_role_table = db.Table(
     'user_role',
     db.Column('user_id', db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), primary_key=True),
     db.Column('role_id', db.Integer, db.ForeignKey('role.role_id', ondelete='CASCADE'), primary_key=True),
-    db.Column('assigned_at', db.DateTime, default=datetime.utcnow),
+    db.Column('assigned_at', db.DateTime, default=datetime.now),
 )
 
 role_permission_table = db.Table(
@@ -41,7 +41,7 @@ class User(db.Model):
     email        = db.Column(db.String(100), unique=True, nullable=False)
     phone        = db.Column(db.String(20))
     avatar_url   = db.Column(db.String(255))
-    created_at   = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at   = db.Column(db.DateTime, default=datetime.now)
     last_login   = db.Column(db.DateTime)
     status       = db.Column(db.SmallInteger, default=1)   # 0=禁用 1=正常
     real_name    = db.Column(db.String(50))
@@ -139,8 +139,8 @@ class File(db.Model):
     cover_url     = db.Column(db.String(500))
     description   = db.Column(db.Text)
     uploader_id   = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
-    upload_time   = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at    = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    upload_time   = db.Column(db.DateTime, default=datetime.now)
+    updated_at    = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
     visibility    = db.Column(db.SmallInteger, default=1)  # 0=私有 1=公开 2=授权可见
     status        = db.Column(db.SmallInteger, default=1)  # 0=已删除 1=正常
     download_count = db.Column(db.Integer, default=0)
@@ -219,7 +219,7 @@ class FilePermission(db.Model):
     file_id         = db.Column(db.Integer, db.ForeignKey('file.file_id', ondelete='CASCADE'), nullable=False)
     user_id         = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
     permission_type = db.Column(db.String(20), nullable=False)  # read / download
-    granted_at      = db.Column(db.DateTime, default=datetime.utcnow)
+    granted_at      = db.Column(db.DateTime, default=datetime.now)
     expire_at       = db.Column(db.DateTime, nullable=True)     # NULL = 永久
 
     file = db.relationship('File', back_populates='permissions')
@@ -228,7 +228,7 @@ class FilePermission(db.Model):
     def is_valid(self) -> bool:
         if self.expire_at is None:
             return True
-        return datetime.utcnow() < self.expire_at
+        return datetime.now() < self.expire_at
 
     def to_dict(self):
         return {
@@ -249,7 +249,7 @@ class Share(db.Model):
     file_id      = db.Column(db.Integer, db.ForeignKey('file.file_id', ondelete='CASCADE'), nullable=False)
     sharer_id    = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
     share_code   = db.Column(db.String(10), unique=True, nullable=False)
-    created_at   = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at   = db.Column(db.DateTime, default=datetime.now)
     expire_at    = db.Column(db.DateTime, nullable=True)    # NULL = 永久
     access_limit = db.Column(db.Integer, default=0)         # 0 = 不限
     access_count = db.Column(db.Integer, default=0)
@@ -261,7 +261,7 @@ class Share(db.Model):
     def is_valid(self) -> bool:
         if self.status != 1:
             return False
-        if self.expire_at and datetime.utcnow() > self.expire_at:
+        if self.expire_at and datetime.now() > self.expire_at:
             return False
         if self.access_limit > 0 and self.access_count >= self.access_limit:
             return False
@@ -291,7 +291,7 @@ class AccessLog(db.Model):
     user_id     = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='SET NULL'), nullable=True)
     file_id     = db.Column(db.Integer, db.ForeignKey('file.file_id', ondelete='CASCADE'), nullable=False)
     action      = db.Column(db.String(20), nullable=False)  # view/download/share/upload
-    access_time = db.Column(db.DateTime, default=datetime.utcnow)
+    access_time = db.Column(db.DateTime, default=datetime.now)
     ip_address  = db.Column(db.String(45))
     user_agent  = db.Column(db.String(200))
 
@@ -329,7 +329,7 @@ class ClubActivity(db.Model):
     lead_instructor_id = db.Column(db.Integer, db.ForeignKey('user.user_id'), nullable=False)
     summary = db.Column(db.Text)
     cover_image = db.Column(db.String(255))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.now)
 
     creator = db.relationship('User', foreign_keys=[created_by])
     lead_instructor = db.relationship('User', foreign_keys=[lead_instructor_id])
@@ -349,6 +349,7 @@ class ClubActivity(db.Model):
             'summary': self.summary, 'participant_count': len(self.participants),
             'media_count': len(self.media_submissions),
             'cover_url': f'/api/club/covers/activity/{self.cover_image}' if self.cover_image else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
         }
         if include_participants:
             data['participants'] = [p.to_dict() for p in self.participants]
@@ -391,7 +392,7 @@ class ActivityMedia(db.Model):
     review_status = db.Column(db.String(20), default='待审阅')
     review_comment = db.Column(db.String(500))
     reviewer_id = db.Column(db.Integer, db.ForeignKey('user.user_id'))
-    submitted_at = db.Column(db.DateTime, default=datetime.utcnow)
+    submitted_at = db.Column(db.DateTime, default=datetime.now)
     reviewed_at = db.Column(db.DateTime)
 
     activity = db.relationship('ClubActivity', back_populates='media_submissions')
@@ -407,6 +408,7 @@ class ActivityMedia(db.Model):
             'submitter_name': (self.submitter.real_name or self.submitter.username) if self.submitter else None,
             'review_status': self.review_status, 'review_comment': self.review_comment,
             'submitted_at': self.submitted_at.isoformat() if self.submitted_at else None,
+            'reviewed_at': self.reviewed_at.isoformat() if self.reviewed_at else None,
         }
 
 
@@ -417,6 +419,8 @@ class EquipmentCategory(db.Model):
     description = db.Column(db.String(255))
     parent_id = db.Column(db.Integer, db.ForeignKey('equipment_category.category_id', ondelete='RESTRICT'))
     sort_order = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
     __table_args__ = (db.UniqueConstraint('category_name', 'parent_id', name='uq_equipment_category_parent'),)
 
     children = db.relationship('EquipmentCategory', backref=db.backref('parent', remote_side='EquipmentCategory.category_id'), lazy='select')
@@ -433,7 +437,9 @@ class EquipmentCategory(db.Model):
         data = {'category_id': self.category_id, 'category_name': self.category_name,
                 'description': self.description, 'parent_id': self.parent_id,
                 'sort_order': self.sort_order, 'full_name': self.full_name(),
-                'equipment_count': len(self.equipment)}
+                'equipment_count': len(self.equipment),
+                'created_at': self.created_at.isoformat() if self.created_at else None,
+                'updated_at': self.updated_at.isoformat() if self.updated_at else None}
         if include_children:
             data['children'] = [c.to_dict(include_children=True)
                                 for c in sorted(self.children, key=lambda x: (x.sort_order, x.category_id))]
@@ -452,6 +458,8 @@ class Equipment(db.Model):
     status = db.Column(db.String(20), default='正常')
     notes = db.Column(db.String(500))
     cover_image = db.Column(db.String(255))
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
     category = db.relationship('EquipmentCategory', back_populates='equipment')
     usage_records = db.relationship('EquipmentUsage', back_populates='equipment')
@@ -467,6 +475,8 @@ class Equipment(db.Model):
             'storage_location': self.storage_location, 'status': self.status,
             'notes': self.notes, 'is_occupied': self.available_quantity == 0,
             'cover_url': f'/api/club/covers/equipment/{self.cover_image}' if self.cover_image else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
 
 
@@ -477,7 +487,7 @@ class EquipmentUsage(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.user_id'), nullable=False)
     activity_id = db.Column(db.Integer, db.ForeignKey('club_activity.activity_id'))
     quantity = db.Column(db.Integer, nullable=False, default=1)
-    borrowed_at = db.Column(db.DateTime, default=datetime.utcnow)
+    borrowed_at = db.Column(db.DateTime, default=datetime.now)
     expected_return_at = db.Column(db.DateTime)
     returned_at = db.Column(db.DateTime)
     status = db.Column(db.String(20), default='使用中')
@@ -523,7 +533,7 @@ class ClubArchive(db.Model):
     file_id = db.Column(db.Integer, db.ForeignKey('file.file_id', ondelete='CASCADE'), nullable=False)
     owner_id = db.Column(db.Integer, db.ForeignKey('user.user_id'), nullable=False)
     description = db.Column(db.String(500))
-    archived_at = db.Column(db.DateTime, default=datetime.utcnow)
+    archived_at = db.Column(db.DateTime, default=datetime.now)
 
     file = db.relationship('File')
     owner = db.relationship('User')
@@ -535,4 +545,32 @@ class ClubArchive(db.Model):
             'file': self.file.to_dict() if self.file else None,
             'owner_name': (self.owner.real_name or self.owner.username) if self.owner else None,
             'archived_at': self.archived_at.isoformat() if self.archived_at else None,
+        }
+
+
+class OperationRecord(db.Model):
+    """跨业务模块的统一时间记录，用于时间中心和操作追溯。"""
+    __tablename__ = 'operation_record'
+
+    record_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    module = db.Column(db.String(30), nullable=False)  # activity/equipment/media/archive/office
+    action = db.Column(db.String(50), nullable=False)
+    target_type = db.Column(db.String(40), nullable=False)
+    target_id = db.Column(db.Integer)
+    target_name = db.Column(db.String(150))
+    operator_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='SET NULL'))
+    detail = db.Column(db.String(500))
+    occurred_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+
+    operator = db.relationship('User')
+
+    def to_dict(self):
+        return {
+            'record_id': self.record_id, 'module': self.module, 'action': self.action,
+            'target_type': self.target_type, 'target_id': self.target_id,
+            'target_name': self.target_name,
+            'operator_name': ((self.operator.real_name or self.operator.username)
+                              if self.operator else '系统'),
+            'detail': self.detail,
+            'occurred_at': self.occurred_at.isoformat() if self.occurred_at else None,
         }

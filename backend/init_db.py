@@ -65,10 +65,16 @@ def upgrade_schema():
     tables = set(inspector.get_table_names())
     upgrades = {
         'club_activity': [('cover_image', 'VARCHAR(255) NULL')],
-        'equipment': [('cover_image', 'VARCHAR(255) NULL')],
+        'equipment': [
+            ('cover_image', 'VARCHAR(255) NULL'),
+            ('created_at', 'DATETIME NULL'),
+            ('updated_at', 'DATETIME NULL'),
+        ],
         'equipment_category': [
             ('parent_id', 'INT NULL'),
             ('sort_order', 'INT NOT NULL DEFAULT 0'),
+            ('created_at', 'DATETIME NULL'),
+            ('updated_at', 'DATETIME NULL'),
         ],
     }
     for table_name, columns in upgrades.items():

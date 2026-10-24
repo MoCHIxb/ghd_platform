@@ -68,6 +68,14 @@ class ClubApiTest(unittest.TestCase):
         overview = self.client.get('/api/club/overview', headers=self.headers)
         self.assertEqual(overview.status_code, 200)
         self.assertEqual(overview.get_json()['activity_count'], 1)
+        time_data = self.client.get('/api/club/time/overview', headers=self.headers,
+                                    query_string={
+                                        'start': datetime.now().isoformat(),
+                                        'end': (datetime.now() + timedelta(days=7)).isoformat(),
+                                    }).get_json()
+        self.assertEqual(time_data['activity_count'], 1)
+        records = self.client.get('/api/club/time/records', headers=self.headers).get_json()['records']
+        self.assertEqual(records[0]['action'], '创建活动')
 
     def test_equipment_conflict_and_return(self):
         first = self.client.post('/api/club/equipment/1/borrow', headers=self.headers,
@@ -79,6 +87,11 @@ class ClubApiTest(unittest.TestCase):
         returned = self.client.put('/api/club/equipment/usages/1/return', headers=self.headers, json={})
         self.assertEqual(returned.status_code, 200)
         self.assertEqual(returned.get_json()['usage']['status'], '已归还')
+        actions = [row['action'] for row in self.client.get(
+            '/api/club/time/records?module=equipment', headers=self.headers
+        ).get_json()['records']]
+        self.assertIn('领用设备', actions)
+        self.assertIn('归还设备', actions)
 
     def test_nested_equipment_categories(self):
         root = self.client.post('/api/club/equipment/categories', headers=self.headers,
