@@ -6,6 +6,7 @@ init_db.py  —  一键初始化数据库
 """
 import sys
 import os
+from datetime import timedelta
 
 # 将 backend 目录加入 path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -14,7 +15,7 @@ import bcrypt
 from sqlalchemy import inspect, text
 from app import create_app
 from extensions import db
-from models import (User, Role, Permission, Category, Department,
+from models import (User, Role, Permission, Category, Department, ClubActivity,
                     EquipmentCategory, Equipment, SocialAccount)
 
 
@@ -64,7 +65,19 @@ def upgrade_schema():
     inspector = inspect(db.engine)
     tables = set(inspector.get_table_names())
     upgrades = {
-        'club_activity': [('cover_image', 'VARCHAR(255) NULL')],
+        'user': [('points', 'INT NOT NULL DEFAULT 0')],
+        'club_activity': [
+            ('cover_image', 'VARCHAR(255) NULL'),
+            ('checkin_start', 'DATETIME NULL'),
+            ('checkin_end', 'DATETIME NULL'),
+            ('participation_points', 'INT NOT NULL DEFAULT 0'),
+            ('terminated_at', 'DATETIME NULL'),
+            ('termination_reason', 'VARCHAR(500) NULL'),
+        ],
+        'activity_participant': [
+            ('checkin_method', 'VARCHAR(20) NULL'),
+            ('points_awarded', 'INT NOT NULL DEFAULT 0'),
+        ],
         'equipment': [
             ('cover_image', 'VARCHAR(255) NULL'),
             ('created_at', 'DATETIME NULL'),
@@ -88,6 +101,12 @@ def upgrade_schema():
                 ))
                 print(f'  升级字段: {table_name}.{column_name}')
     db.session.commit()
+    if 'club_activity' in tables:
+        for activity in ClubActivity.query.filter(
+                ClubActivity.checkin_start.is_(None)).all():
+            activity.checkin_start = activity.start_time - timedelta(minutes=30)
+            activity.checkin_end = activity.start_time + timedelta(minutes=30)
+        db.session.commit()
 
 
 def init():

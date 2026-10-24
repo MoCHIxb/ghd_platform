@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import create_app
 from config import Config
 from extensions import db
-from models import Department, Equipment, EquipmentCategory, Role, User
+from models import ClubActivity, Department, Equipment, EquipmentCategory, Role, User
 
 
 class TestConfig(Config):
@@ -33,18 +33,26 @@ class ClubApiTest(unittest.TestCase):
 
         department = Department(department_name='综合办公室', sort_order=1)
         captain_role = Role(role_name='captain')
+        member_role = Role(role_name='member')
         password_hash = bcrypt.hashpw(b'password', bcrypt.gensalt()).decode()
         captain = User(username='captain', email='captain@test.local',
                        password_hash=password_hash, department=department)
         captain.roles.append(captain_role)
+        member = User(username='member', email='member@test.local', real_name='测试社员',
+                      password_hash=password_hash, department=department)
+        member.roles.append(member_role)
         category = EquipmentCategory(category_name='仪仗装备')
         equipment = Equipment(asset_code='T-001', equipment_name='测试礼宾枪',
                               category=category, total_quantity=2, available_quantity=2)
-        db.session.add_all([department, captain_role, captain, category, equipment])
+        db.session.add_all([department, captain_role, member_role, captain, member, category, equipment])
         db.session.commit()
         self.client = self.app.test_client()
         response = self.client.post('/api/auth/login', json={'username': 'captain', 'password': 'password'})
         self.headers = {'Authorization': 'Bearer ' + response.get_json()['token']}
+        member_response = self.client.post('/api/auth/login', json={
+            'username': 'member', 'password': 'password'
+        })
+        self.member_headers = {'Authorization': 'Bearer ' + member_response.get_json()['token']}
 
     def tearDown(self):
         db.session.remove()
@@ -114,6 +122,89 @@ class ClubApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertIn('/api/club/covers/equipment/',
                       response.get_json()['equipment']['cover_url'])
+
+    def test_strict_checkin_points_and_final_record(self):
+        now = datetime.now()
+        created = self.client.post('/api/club/activities', headers=self.headers, json={
+            'title': '严格考勤活动', 'activity_type': '训练',
+            'start_time': (now + timedelta(hours=1)).isoformat(),
+            'end_time': (now + timedelta(hours=2)).isoformat(),
+            'checkin_start': (now + timedelta(minutes=30)).isoformat(),
+            'checkin_end': (now + timedelta(minutes=45)).isoformat(),
+            'participation_points': 25,
+        })
+        self.assertEqual(created.status_code, 201)
+        activity_id = created.get_json()['activity']['activity_id']
+
+        early = self.client.post(f'/api/club/activities/{activity_id}/check-in',
+                                 headers=self.member_headers, json={})
+        self.assertEqual(early.status_code, 409)
+
+        activity = db.session.get(ClubActivity, activity_id)
+        activity.start_time = now - timedelta(minutes=10)
+        activity.end_time = now + timedelta(hours=1)
+        activity.checkin_start = now - timedelta(minutes=5)
+        activity.checkin_end = now + timedelta(minutes=5)
+        db.session.commit()
+        checked = self.client.post(f'/api/club/activities/{activity_id}/check-in',
+                                   headers=self.member_headers, json={})
+        self.assertEqual(checked.status_code, 200)
+        self.assertEqual(checked.get_json()['participant']['checkin_method'], '本人打卡')
+
+        completed = self.client.put(f'/api/club/activities/{activity_id}/summary',
+                                    headers=self.headers,
+                                    json={'summary': '测试结项', 'status': '已完成'})
+        self.assertEqual(completed.status_code, 200)
+        self.assertEqual(completed.get_json()['awarded_count'], 1)
+        completed_again = self.client.put(f'/api/club/activities/{activity_id}/summary',
+                                          headers=self.headers,
+                                          json={'summary': '重复保存', 'status': '已完成'})
+        self.assertEqual(completed_again.get_json()['awarded_count'], 0)
+
+        points = self.client.get('/api/club/points/my', headers=self.member_headers).get_json()
+        self.assertEqual(points['points'], 25)
+        self.assertEqual(len(points['transactions']), 1)
+        record = self.client.get(f'/api/club/activities/{activity_id}/record',
+                                 headers=self.member_headers)
+        self.assertEqual(record.status_code, 200)
+        self.assertEqual(record.get_json()['participants'][0]['name'], '测试社员')
+        self.assertEqual(record.get_json()['attendance_summary']['已签到'], 1)
+
+        rejected = self.client.post(f'/api/club/activities/{activity_id}/check-in',
+                                    headers=self.member_headers, json={})
+        self.assertEqual(rejected.status_code, 409)
+
+    def test_edit_terminate_and_week_schedule(self):
+        now = datetime.now()
+        start = now + timedelta(days=2)
+        created = self.client.post('/api/club/activities', headers=self.headers, json={
+            'title': '待调整活动', 'activity_type': '升旗',
+            'start_time': start.isoformat(),
+            'end_time': (start + timedelta(hours=1)).isoformat(),
+            'participation_points': 10,
+        })
+        activity_id = created.get_json()['activity']['activity_id']
+        edited = self.client.put(f'/api/club/activities/{activity_id}', headers=self.headers,
+                                 json={'title': '已调整活动', 'participation_points': 18})
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(edited.get_json()['activity']['participation_points'], 18)
+
+        schedule_before = self.client.get('/api/club/schedule', headers=self.headers,
+                                          query_string={
+                                              'start': now.isoformat(),
+                                              'end': (now + timedelta(days=7)).isoformat(),
+                                          }).get_json()['activities']
+        self.assertEqual(len(schedule_before), 1)
+        terminated = self.client.post(f'/api/club/activities/{activity_id}/terminate',
+                                      headers=self.headers, json={'reason': '天气原因取消'})
+        self.assertEqual(terminated.status_code, 200)
+        self.assertEqual(terminated.get_json()['activity']['status'], '已终止')
+        schedule_after = self.client.get('/api/club/schedule', headers=self.headers,
+                                         query_string={
+                                             'start': now.isoformat(),
+                                             'end': (now + timedelta(days=7)).isoformat(),
+                                         }).get_json()['activities']
+        self.assertEqual(schedule_after, [])
 
 
 if __name__ == '__main__':

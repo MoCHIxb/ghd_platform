@@ -47,6 +47,7 @@ class User(db.Model):
     real_name    = db.Column(db.String(50))
     student_no   = db.Column(db.String(30), unique=True)
     department_id = db.Column(db.Integer, db.ForeignKey('department.department_id', ondelete='SET NULL'))
+    points        = db.Column(db.Integer, default=0, nullable=False)
 
     roles            = db.relationship('Role', secondary=user_role_table, back_populates='users', lazy='select')
     files            = db.relationship('File', back_populates='uploader', lazy='dynamic')
@@ -77,6 +78,7 @@ class User(db.Model):
             'student_no': self.student_no,
             'department_id': self.department_id,
             'department': self.department.department_name if self.department else None,
+            'points':      self.points or 0,
         }
 
 
@@ -329,6 +331,11 @@ class ClubActivity(db.Model):
     lead_instructor_id = db.Column(db.Integer, db.ForeignKey('user.user_id'), nullable=False)
     summary = db.Column(db.Text)
     cover_image = db.Column(db.String(255))
+    checkin_start = db.Column(db.DateTime)
+    checkin_end = db.Column(db.DateTime)
+    participation_points = db.Column(db.Integer, default=0, nullable=False)
+    terminated_at = db.Column(db.DateTime)
+    termination_reason = db.Column(db.String(500))
     created_at = db.Column(db.DateTime, default=datetime.now)
 
     creator = db.relationship('User', foreign_keys=[created_by])
@@ -350,6 +357,12 @@ class ClubActivity(db.Model):
             'media_count': len(self.media_submissions),
             'cover_url': f'/api/club/covers/activity/{self.cover_image}' if self.cover_image else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
+            'checkin_start': self.checkin_start.isoformat() if self.checkin_start else None,
+            'checkin_end': self.checkin_end.isoformat() if self.checkin_end else None,
+            'participation_points': self.participation_points or 0,
+            'terminated_at': self.terminated_at.isoformat() if self.terminated_at else None,
+            'termination_reason': self.termination_reason,
+            'present_count': sum(1 for p in self.participants if p.attendance_status in ('已签到', '已到')),
         }
         if include_participants:
             data['participants'] = [p.to_dict() for p in self.participants]
@@ -367,6 +380,8 @@ class ActivityParticipant(db.Model):
     score = db.Column(db.Numeric(5, 2))
     performance_comment = db.Column(db.String(500))
     checked_at = db.Column(db.DateTime)
+    checkin_method = db.Column(db.String(20))
+    points_awarded = db.Column(db.Integer, default=0, nullable=False)
 
     activity = db.relationship('ClubActivity', back_populates='participants')
     user = db.relationship('User')
@@ -379,6 +394,8 @@ class ActivityParticipant(db.Model):
             'score': float(self.score) if self.score is not None else None,
             'performance_comment': self.performance_comment,
             'checked_at': self.checked_at.isoformat() if self.checked_at else None,
+            'checkin_method': self.checkin_method,
+            'points_awarded': self.points_awarded or 0,
         }
 
 
@@ -573,4 +590,31 @@ class OperationRecord(db.Model):
                               if self.operator else '系统'),
             'detail': self.detail,
             'occurred_at': self.occurred_at.isoformat() if self.occurred_at else None,
+        }
+
+
+class PointTransaction(db.Model):
+    """账户积分流水；每名社员每个活动最多产生一次参与积分。"""
+    __tablename__ = 'point_transaction'
+    __table_args__ = (db.UniqueConstraint('user_id', 'activity_id', name='uq_point_user_activity'),)
+
+    transaction_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
+    activity_id = db.Column(db.Integer, db.ForeignKey('club_activity.activity_id', ondelete='SET NULL'))
+    points = db.Column(db.Integer, nullable=False)
+    reason = db.Column(db.String(255), nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='SET NULL'))
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+    user = db.relationship('User', foreign_keys=[user_id])
+    activity = db.relationship('ClubActivity')
+    creator = db.relationship('User', foreign_keys=[created_by])
+
+    def to_dict(self):
+        return {
+            'transaction_id': self.transaction_id, 'user_id': self.user_id,
+            'activity_id': self.activity_id,
+            'activity_title': self.activity.title if self.activity else None,
+            'points': self.points, 'reason': self.reason,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
         }

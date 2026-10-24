@@ -10,8 +10,8 @@ from werkzeug.utils import secure_filename
 from extensions import db
 from models import (
     ActivityMedia, ActivityParticipant, ClubActivity, ClubArchive, Department,
-    Equipment, EquipmentCategory, EquipmentUsage, File, OperationRecord, Role,
-    SocialAccount, User,
+    Equipment, EquipmentCategory, EquipmentUsage, File, OperationRecord,
+    PointTransaction, Role, SocialAccount, User,
 )
 from utils.auth_helper import get_current_user, require_auth
 
@@ -98,6 +98,28 @@ def _record(user, module, action, target_type, target=None, target_name=None, de
         operator_id=user.user_id if user else None, detail=detail,
         occurred_at=datetime.now(),
     ))
+
+
+def _award_activity_points(activity, operator):
+    """结项时向有效出勤人员发放一次参与积分，返回发放人数。"""
+    awarded_count = 0
+    points = activity.participation_points or 0
+    for participant in activity.participants:
+        if participant.attendance_status not in ('已签到', '已到'):
+            continue
+        existing = PointTransaction.query.filter_by(
+            user_id=participant.user_id, activity_id=activity.activity_id).first()
+        if existing:
+            continue
+        participant.user.points = (participant.user.points or 0) + points
+        participant.points_awarded = points
+        db.session.add(PointTransaction(
+            user_id=participant.user_id, activity_id=activity.activity_id,
+            points=points, reason=f'参与活动：{activity.title}',
+            created_by=operator.user_id,
+        ))
+        awarded_count += 1
+    return awarded_count
 
 
 @club_bp.route('/departments', methods=['GET'])
@@ -217,6 +239,35 @@ def time_records():
     return jsonify(records=[row.to_dict() for row in rows]), 200
 
 
+@club_bp.route('/schedule', methods=['GET'])
+@require_auth
+def activity_schedule():
+    """课程表式活动日程，默认返回当前周起四周。"""
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    monday = today - timedelta(days=today.weekday())
+    try:
+        start = _parse_dt(request.args.get('start')) or monday
+        end = _parse_dt(request.args.get('end')) or (start + timedelta(days=28))
+    except ValueError:
+        return jsonify(msg='时间范围格式错误'), 400
+    rows = ClubActivity.query.filter(
+        ClubActivity.start_time >= start, ClubActivity.start_time < end,
+        ClubActivity.status != '已终止',
+    ).order_by(ClubActivity.start_time).all()
+    return jsonify(start=start.isoformat(), end=end.isoformat(),
+                   activities=[row.to_dict() for row in rows]), 200
+
+
+@club_bp.route('/points/my', methods=['GET'])
+@require_auth
+def my_points():
+    user = get_current_user()
+    rows = PointTransaction.query.filter_by(user_id=user.user_id).order_by(
+        PointTransaction.created_at.desc()).all()
+    return jsonify(points=user.points or 0,
+                   transactions=[row.to_dict() for row in rows]), 200
+
+
 # ── 教官部：活动项目 ─────────────────────────────────────────────────────────
 
 @club_bp.route('/activities', methods=['GET'])
@@ -244,8 +295,20 @@ def create_activity():
     try:
         start_time = _parse_dt(data.get('start_time'), required=True)
         end_time = _parse_dt(data.get('end_time'))
+        checkin_start = _parse_dt(data.get('checkin_start')) or (start_time - timedelta(minutes=30))
+        checkin_end = _parse_dt(data.get('checkin_end')) or (start_time + timedelta(minutes=30))
     except ValueError:
         return jsonify(msg='日期时间格式错误'), 400
+    if end_time and end_time <= start_time:
+        return jsonify(msg='活动结束时间必须晚于开始时间'), 400
+    if checkin_end <= checkin_start:
+        return jsonify(msg='签到结束时间必须晚于签到开始时间'), 400
+    try:
+        participation_points = int(data.get('participation_points', 0))
+    except (TypeError, ValueError):
+        return jsonify(msg='活动积分必须是整数'), 400
+    if participation_points < 0 or participation_points > 1000:
+        return jsonify(msg='活动积分必须在 0 到 1000 之间'), 400
     lead_id = data.get('lead_instructor_id') or user.user_id
     lead = User.query.get(lead_id)
     if not lead:
@@ -260,6 +323,8 @@ def create_activity():
         start_time=start_time, end_time=end_time, status=data.get('status', '筹备中'),
         created_by=user.user_id, lead_instructor_id=lead.user_id,
         cover_image=cover_image,
+        checkin_start=checkin_start, checkin_end=checkin_end,
+        participation_points=participation_points,
     )
     db.session.add(activity)
     db.session.flush()
@@ -275,6 +340,129 @@ def activity_detail(activity_id):
     activity = ClubActivity.query.get_or_404(activity_id)
     return jsonify(activity=activity.to_dict(include_participants=True),
                    media=[m.to_dict() for m in activity.media_submissions]), 200
+
+
+@club_bp.route('/activities/<int:activity_id>/record', methods=['GET'])
+@require_auth
+def activity_record(activity_id):
+    activity = ClubActivity.query.get_or_404(activity_id)
+    if activity.status not in ('已完成', '已终止') and (
+            not activity.end_time or datetime.now() < activity.end_time):
+        return jsonify(msg='活动尚未结束，暂未生成最终记录'), 409
+    participants = [row.to_dict() for row in activity.participants]
+    status_counts = {}
+    scores = []
+    for row in activity.participants:
+        status_counts[row.attendance_status] = status_counts.get(row.attendance_status, 0) + 1
+        if row.score is not None:
+            scores.append(float(row.score))
+    return jsonify(
+        activity=activity.to_dict(), participants=participants,
+        attendance_summary=status_counts,
+        average_score=round(sum(scores) / len(scores), 2) if scores else None,
+        total_points_awarded=sum(row.points_awarded or 0 for row in activity.participants),
+    ), 200
+
+
+@club_bp.route('/activities/<int:activity_id>', methods=['PUT'])
+@require_auth
+def edit_activity(activity_id):
+    user = get_current_user()
+    activity = ClubActivity.query.get_or_404(activity_id)
+    denied = _deny_unless(_can_manage_activity(user, activity), '仅项目创建者、主教官或管理人员可编辑项目')
+    if denied:
+        return denied
+    if activity.status == '已终止':
+        return jsonify(msg='已终止项目不能编辑'), 409
+    if datetime.now() >= activity.start_time:
+        return jsonify(msg='活动已经开始，不能再修改项目安排'), 409
+    data = request.get_json() or {}
+    try:
+        new_start = _parse_dt(data.get('start_time')) if 'start_time' in data else activity.start_time
+        new_end = _parse_dt(data.get('end_time')) if 'end_time' in data else activity.end_time
+        new_checkin_start = (_parse_dt(data.get('checkin_start'))
+                             if 'checkin_start' in data else activity.checkin_start)
+        new_checkin_end = (_parse_dt(data.get('checkin_end'))
+                           if 'checkin_end' in data else activity.checkin_end)
+    except ValueError:
+        return jsonify(msg='日期时间格式错误'), 400
+    if new_end and new_end <= new_start:
+        return jsonify(msg='活动结束时间必须晚于开始时间'), 400
+    if not new_checkin_start or not new_checkin_end or new_checkin_end <= new_checkin_start:
+        return jsonify(msg='签到时间窗口设置无效'), 400
+    if 'participation_points' in data:
+        try:
+            points = int(data['participation_points'])
+        except (TypeError, ValueError):
+            return jsonify(msg='活动积分必须是整数'), 400
+        if points < 0 or points > 1000:
+            return jsonify(msg='活动积分必须在 0 到 1000 之间'), 400
+        if (points != activity.participation_points and
+                activity.created_by != user.user_id and not _is_captain(user)):
+            return jsonify(msg='仅项目创建者或队长可调整活动积分'), 403
+        activity.participation_points = points
+    for field in ('title', 'activity_type', 'description', 'location'):
+        if field in data:
+            setattr(activity, field, data[field])
+    activity.start_time, activity.end_time = new_start, new_end
+    activity.checkin_start, activity.checkin_end = new_checkin_start, new_checkin_end
+    _record(user, 'activity', '编辑活动项目', 'activity', activity, activity.title,
+            f'活动时间：{activity.start_time.isoformat()}')
+    db.session.commit()
+    return jsonify(msg='活动项目已更新', activity=activity.to_dict()), 200
+
+
+@club_bp.route('/activities/<int:activity_id>/terminate', methods=['POST'])
+@require_auth
+def terminate_activity(activity_id):
+    user = get_current_user()
+    activity = ClubActivity.query.get_or_404(activity_id)
+    denied = _deny_unless(_can_manage_activity(user, activity), '无权终止该项目')
+    if denied:
+        return denied
+    if activity.status in ('已完成', '已终止'):
+        return jsonify(msg='项目已经结束'), 409
+    data = request.get_json() or {}
+    reason = (data.get('reason') or '').strip()
+    if not reason:
+        return jsonify(msg='请填写终止原因'), 400
+    activity.status = '已终止'
+    activity.terminated_at = datetime.now()
+    activity.termination_reason = reason
+    _record(user, 'activity', '人为终止项目', 'activity', activity, activity.title, reason)
+    db.session.commit()
+    return jsonify(msg='活动项目已终止', activity=activity.to_dict()), 200
+
+
+@club_bp.route('/activities/<int:activity_id>/check-in', methods=['POST'])
+@require_auth
+def self_check_in(activity_id):
+    user = get_current_user()
+    activity = ClubActivity.query.get_or_404(activity_id)
+    now = datetime.now()
+    if activity.status in ('已完成', '已终止'):
+        return jsonify(msg='项目已经结束，不能打卡'), 409
+    if not activity.checkin_start or not activity.checkin_end:
+        return jsonify(msg='项目尚未设置签到时间'), 409
+    if now < activity.checkin_start:
+        return jsonify(msg=f'签到尚未开始，请于 {activity.checkin_start:%m月%d日 %H:%M} 后打卡'), 409
+    if now > activity.checkin_end:
+        return jsonify(msg='签到时间已结束，本次打卡无效'), 409
+    row = ActivityParticipant.query.filter_by(activity_id=activity_id, user_id=user.user_id).first()
+    if row and row.attendance_status in ('已签到', '已到'):
+        return jsonify(msg='你已经完成签到', participant=row.to_dict()), 200
+    if not row:
+        row = ActivityParticipant(activity_id=activity_id, user_id=user.user_id)
+        db.session.add(row)
+    row.attendance_status = '已签到'
+    row.checked_at = now
+    row.checkin_method = '本人打卡'
+    db.session.flush()
+    _record(user, 'activity', '活动签到', 'participant', row,
+            f'{activity.title} / {user.real_name or user.username}',
+            f'签到时间：{now.isoformat()}')
+    db.session.commit()
+    return jsonify(msg='签到成功，已计入参与名单', participant=row.to_dict()), 200
 
 
 @club_bp.route('/activities/<int:activity_id>/transfer', methods=['PUT'])
@@ -314,6 +502,7 @@ def update_participant(activity_id):
     if 'attendance_status' in data:
         row.attendance_status = data['attendance_status']
         row.checked_at = datetime.now()
+        row.checkin_method = '管理登记'
     if 'score' in data:
         score = float(data['score'])
         if score < 0 or score > 100:
@@ -339,12 +528,20 @@ def update_summary(activity_id):
         return denied
     data = request.get_json() or {}
     activity.summary = (data.get('summary') or '').strip()
+    awarded_count = 0
     if data.get('status'):
+        if activity.status == '已终止':
+            return jsonify(msg='已终止项目不能结项'), 409
+        if data['status'] == '已完成' and datetime.now() < activity.start_time:
+            return jsonify(msg='活动尚未开始，不能提前结项'), 409
         activity.status = data['status']
+        if activity.status == '已完成':
+            awarded_count = _award_activity_points(activity, user)
     _record(user, 'activity', '保存项目总结', 'activity', activity, activity.title,
-            f'项目状态：{activity.status}')
+            f'项目状态：{activity.status} · 发放积分人数：{awarded_count}')
     db.session.commit()
-    return jsonify(msg='项目总结已保存', activity=activity.to_dict()), 200
+    return jsonify(msg='项目总结已保存', activity=activity.to_dict(),
+                   awarded_count=awarded_count), 200
 
 
 @club_bp.route('/activities/<int:activity_id>/media', methods=['POST'])
