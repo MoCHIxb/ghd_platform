@@ -5,7 +5,6 @@ from uuid import uuid4
 from flask import Blueprint, current_app, jsonify, request, send_from_directory
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-from werkzeug.utils import secure_filename
 
 from extensions import db
 from models import (
@@ -13,7 +12,8 @@ from models import (
     Equipment, EquipmentCategory, EquipmentUsage, File, OperationRecord,
     PointTransaction, Role, SocialAccount, TemporaryDepartmentGrant, User,
 )
-from utils.auth_helper import get_current_user, require_auth
+from utils.auth_helper import check_file_access, get_current_user, require_auth
+from utils.file_helper import sanitize_original_name
 
 
 club_bp = Blueprint('club', __name__, url_prefix='/api/club')
@@ -29,10 +29,8 @@ def _save_cover(kind):
     image = request.files.get('cover')
     if not image or not image.filename:
         return None
-    safe_name = secure_filename(image.filename)
-    if '.' not in safe_name:
-        raise ValueError('图片格式不合法')
-    ext = safe_name.rsplit('.', 1)[1].lower()
+    # 只取扩展名做白名单校验，落盘一律使用 UUID 文件名，因此中文原名不会造成问题。
+    _, ext = sanitize_original_name(image.filename)
     if ext not in ALLOWED_COVER_EXTENSIONS:
         raise ValueError('仅支持 jpg、jpeg、png、webp、gif 图片')
     folder = os.path.join(current_app.config['UPLOAD_FOLDER'], 'covers', kind)
@@ -566,10 +564,24 @@ def update_summary(activity_id):
 def submit_media(activity_id):
     user = get_current_user()
     activity = ClubActivity.query.get_or_404(activity_id)
+    if activity.status == '已终止':
+        return jsonify(msg='项目已终止，不能再提交素材'), 409
     data = request.get_json() or {}
-    media_file = File.query.get(data.get('file_id'))
-    if not media_file:
+    # file_id 缺失或不是整数时，Query.get(None) 会抛 InvalidRequestError 变成 500，
+    # 这里先做类型收敛，保证任何畸形请求都只返回 4xx。
+    try:
+        file_id = int(data.get('file_id'))
+    except (TypeError, ValueError):
+        return jsonify(msg='缺少有效的文件标识'), 400
+    media_file = db.session.get(File, file_id)
+    if not media_file or media_file.status != 1:
         return jsonify(msg='请先上传素材文件'), 404
+    if not check_file_access(media_file, user, 'read'):
+        return jsonify(msg='无权使用该文件'), 403
+    duplicate = ActivityMedia.query.filter_by(
+        activity_id=activity.activity_id, file_id=media_file.file_id).first()
+    if duplicate:
+        return jsonify(msg='该文件已经提交过，请勿重复提交'), 409
     row = ActivityMedia(activity_id=activity.activity_id, file_id=media_file.file_id,
                         submitter_id=user.user_id)
     db.session.add(row)
@@ -776,7 +788,12 @@ def archives():
     if denied:
         return denied
     data = request.get_json() or {}
-    linked_file = File.query.get(data.get('file_id'))
+    # 同 submit_media：file_id 缺失或非法时先收敛类型，避免 Query.get(None) 抛 500。
+    try:
+        file_id = int(data.get('file_id'))
+    except (TypeError, ValueError):
+        return jsonify(msg='缺少有效的文件标识'), 400
+    linked_file = db.session.get(File, file_id)
     if not linked_file:
         return jsonify(msg='请先上传需要归档的文件'), 404
     row = ClubArchive(title=(data.get('title') or '').strip(),
