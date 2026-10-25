@@ -37,7 +37,7 @@
 
 - 前端：原生 HTML、CSS、JavaScript 单页应用
 - 后端：Python 3.10+、Flask、Flask-SQLAlchemy、Flask-JWT-Extended
-- 数据库：MySQL 8+
+- 数据库：本地开发默认 SQLite（免安装），生产部署支持 MySQL 8+
 - 鉴权：JWT + bcrypt
 
 ## 系统结构
@@ -69,10 +69,11 @@ python -m venv .venv
 pip install -r backend\requirements.txt
 ```
 
-配置数据库环境变量：
+本地预览无需安装 MySQL，初始化脚本会在 `backend/ghd_platform.db` 创建 SQLite 数据库。如需切换到 MySQL，请配置：
 
 ```powershell
 $env:DB_HOST='127.0.0.1'
+$env:DB_BACKEND='mysql'
 $env:DB_PORT='3306'
 $env:DB_USER='root'
 $env:DB_PASS='your_password'
@@ -80,6 +81,8 @@ $env:DB_NAME='ghd_platform'
 $env:SECRET_KEY='change_me'
 $env:JWT_SECRET_KEY='change_me_too'
 ```
+
+也可以直接设置完整的 `$env:DATABASE_URL`；它的优先级高于上述配置。
 
 首次运行请使用 Python 初始化脚本（不要使用旧版 `sql/init.sql`）：
 

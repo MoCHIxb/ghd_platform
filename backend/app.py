@@ -1,5 +1,6 @@
 import os
 from flask import Flask, jsonify, send_from_directory
+from sqlalchemy.exc import OperationalError
 from config import Config
 from extensions import db, jwt, cors
 
@@ -44,6 +45,10 @@ def create_app(config_class=Config):
     @app.errorhandler(500)
     def internal_error(e):
         return jsonify(msg='服务器内部错误'), 500
+
+    @app.errorhandler(OperationalError)
+    def database_unavailable(e):
+        return jsonify(msg='数据库暂时不可用，请检查数据库配置或先运行初始化脚本'), 503
 
     # 前端 SPA 路由：非 /api 的请求一律返回 index.html
     @app.route('/', defaults={'path': ''})
