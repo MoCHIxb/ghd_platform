@@ -5,10 +5,10 @@ from flask_jwt_extended import create_access_token, get_jwt_identity
 import bcrypt
 from datetime import datetime
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-from werkzeug.utils import secure_filename
 from extensions import db
 from models import MembershipRequest, User, Role
 from utils.auth_helper import require_auth, get_current_user
+from utils.file_helper import sanitize_original_name
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
@@ -211,11 +211,8 @@ def upload_avatar():
     if not file or not file.filename:
         return jsonify(msg='请选择头像文件'), 400
 
-    original = secure_filename(file.filename)
-    if '.' not in original:
-        return jsonify(msg='头像格式不合法'), 400
-
-    ext = original.rsplit('.', 1)[1].lower()
+    # 不使用 secure_filename：它会把 '头像.png' 压成 'png'，导致合法图片被判为格式错误。
+    _, ext = sanitize_original_name(file.filename)
     if ext not in ALLOWED_AVATAR_EXTS:
         return jsonify(msg='仅支持 png/jpg/jpeg/gif/webp'), 400
 
