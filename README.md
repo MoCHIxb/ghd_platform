@@ -92,7 +92,28 @@ cd backend
 ..\.venv\Scripts\python.exe app.py
 ```
 
-浏览器访问 <http://127.0.0.1:5000>。
+保持运行窗口开启，然后在系统浏览器访问 <http://127.0.0.1:5000>。终端中显示的 `0.0.0.0` 是监听地址，不是浏览器访问地址。
+
+停止服务时，在运行 Flask 的终端中按 `Ctrl+C`，不要反复启动多个后台实例。
+
+### 端口冲突与页面无法访问
+
+如果终端显示服务已启动，但 `127.0.0.1:5000` 无法打开，先停止原服务，再使用备用端口：
+
+```powershell
+cd D:\国护队项目\backend
+..\.venv\Scripts\python.exe -m flask --app app run --host 127.0.0.1 --port 5002
+```
+
+随后访问 <http://127.0.0.1:5002>。可使用下面的命令检查 5000–5002 端口是否存在残留监听进程：
+
+```powershell
+Get-NetTCPConnection -State Listen |
+  Where-Object { $_.LocalPort -in 5000,5001,5002 } |
+  Select-Object LocalAddress,LocalPort,OwningProcess
+```
+
+通过 `Get-Process -Id <OwningProcess>` 核对进程确实属于本项目后，再使用 `Stop-Process -Id <OwningProcess>` 关闭；不要直接结束未确认用途的 Python 进程。
 
 初始队长账号：
 
