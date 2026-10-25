@@ -147,8 +147,12 @@ def init():
                 admin_role.permissions.append(p)
             if pname not in ADMIN_ONLY and p not in user_role.permissions:
                 user_role.permissions.append(p)
-            if p not in minister_role.permissions:
+            if pname not in ADMIN_ONLY and p not in minister_role.permissions:
                 minister_role.permissions.append(p)
+        # 部长的通用权限不应越过部门边界；历史版本可能已绑定管理员权限。
+        for permission in list(minister_role.permissions):
+            if permission.permission_name in ADMIN_ONLY:
+                minister_role.permissions.remove(permission)
 
         # 部门
         department_objects = {}
@@ -162,14 +166,17 @@ def init():
             department_objects[name] = row
 
         # 管理员账号
-        if not User.query.filter_by(username='captain').first():
+        captain = User.query.filter_by(username='captain').first()
+        if not captain:
             pw_hash = bcrypt.hashpw(ADMIN_PASSWORD.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-            admin = User(username='captain', real_name='示例队长', password_hash=pw_hash,
-                         email='captain@ghd.local', status=1,
-                         department=department_objects['综合办公室'])
-            admin.roles.append(admin_role)
-            db.session.add(admin)
+            captain = User(username='captain', real_name='示例队长', password_hash=pw_hash,
+                           email='captain@ghd.local', status=1, department=None)
+            captain.roles.append(admin_role)
+            db.session.add(captain)
             print(f'  创建队长账号: captain / {ADMIN_PASSWORD}')
+        else:
+            # 队长是独立于三个业务部门的全队职务。
+            captain.department = None
 
         # 初始分类
         cat_map = {}

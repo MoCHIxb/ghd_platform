@@ -43,7 +43,7 @@ class User(db.Model):
     avatar_url   = db.Column(db.String(255))
     created_at   = db.Column(db.DateTime, default=datetime.now)
     last_login   = db.Column(db.DateTime)
-    status       = db.Column(db.SmallInteger, default=1)   # 0=禁用 1=正常
+    status       = db.Column(db.SmallInteger, default=1)   # 0=已注销 1=正常 2=注册待审 3=注销待审
     real_name    = db.Column(db.String(50))
     student_no   = db.Column(db.String(30), unique=True)
     department_id = db.Column(db.Integer, db.ForeignKey('department.department_id', ondelete='SET NULL'))
@@ -55,6 +55,9 @@ class User(db.Model):
     shares           = db.relationship('Share', back_populates='sharer', lazy='dynamic')
     access_logs      = db.relationship('AccessLog', back_populates='user', lazy='dynamic')
     department       = db.relationship('Department', back_populates='members')
+    temporary_grants = db.relationship(
+        'TemporaryDepartmentGrant', foreign_keys='TemporaryDepartmentGrant.user_id',
+        lazy='select', cascade='all, delete-orphan')
 
     def has_role(self, role_name: str) -> bool:
         names = {r.role_name for r in self.roles}
@@ -79,6 +82,10 @@ class User(db.Model):
             'department_id': self.department_id,
             'department': self.department.department_name if self.department else None,
             'points':      self.points or 0,
+            'temporary_edit_departments': [
+                grant.department.department_name for grant in self.temporary_grants
+                if grant.is_active() and grant.department
+            ],
         }
 
 
@@ -616,5 +623,195 @@ class PointTransaction(db.Model):
             'activity_id': self.activity_id,
             'activity_title': self.activity.title if self.activity else None,
             'points': self.points, 'reason': self.reason,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class MembershipRequest(db.Model):
+    """新社员注册或现有社员注销申请。"""
+    __tablename__ = 'membership_request'
+
+    request_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    request_type = db.Column(db.String(20), nullable=False)  # 注册 / 注销
+    user_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
+    reason = db.Column(db.String(500))
+    status = db.Column(db.String(20), default='待审核', nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='SET NULL'))
+    reviewed_at = db.Column(db.DateTime)
+    review_comment = db.Column(db.String(500))
+
+    user = db.relationship('User', foreign_keys=[user_id])
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by])
+
+    def to_dict(self):
+        return {
+            'request_id': self.request_id, 'request_type': self.request_type,
+            'user_id': self.user_id,
+            'user_name': (self.user.real_name or self.user.username) if self.user else None,
+            'username': self.user.username if self.user else None,
+            'student_no': self.user.student_no if self.user else None,
+            'reason': self.reason, 'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'reviewed_at': self.reviewed_at.isoformat() if self.reviewed_at else None,
+            'review_comment': self.review_comment,
+        }
+
+
+class DepartmentApplication(db.Model):
+    """社员加入部门申请，需要队长和目标部门部长共同通过。"""
+    __tablename__ = 'department_application'
+
+    application_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
+    department_id = db.Column(db.Integer, db.ForeignKey('department.department_id', ondelete='CASCADE'), nullable=False)
+    reason = db.Column(db.String(500))
+    status = db.Column(db.String(20), default='待审核', nullable=False)
+    captain_approved = db.Column(db.Boolean)
+    minister_approved = db.Column(db.Boolean)
+    captain_reviewer_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='SET NULL'))
+    minister_reviewer_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='SET NULL'))
+    captain_reviewed_at = db.Column(db.DateTime)
+    minister_reviewed_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    completed_at = db.Column(db.DateTime)
+
+    user = db.relationship('User', foreign_keys=[user_id])
+    department = db.relationship('Department')
+
+    def to_dict(self):
+        return {
+            'application_id': self.application_id, 'user_id': self.user_id,
+            'user_name': (self.user.real_name or self.user.username) if self.user else None,
+            'department_id': self.department_id,
+            'department_name': self.department.department_name if self.department else None,
+            'reason': self.reason, 'status': self.status,
+            'captain_approved': self.captain_approved,
+            'minister_approved': self.minister_approved,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+class TemporaryDepartmentGrant(db.Model):
+    """部长授予本部门普通社员的限时后台编辑权限。"""
+    __tablename__ = 'temporary_department_grant'
+
+    grant_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
+    department_id = db.Column(db.Integer, db.ForeignKey('department.department_id', ondelete='CASCADE'), nullable=False)
+    granted_by = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='SET NULL'))
+    reason = db.Column(db.String(500))
+    starts_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    revoked_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+    user = db.relationship('User', foreign_keys=[user_id], back_populates='temporary_grants')
+    department = db.relationship('Department')
+    granter = db.relationship('User', foreign_keys=[granted_by])
+
+    def is_active(self):
+        now = datetime.now()
+        return not self.revoked_at and self.starts_at <= now < self.expires_at
+
+    def to_dict(self):
+        return {
+            'grant_id': self.grant_id, 'user_id': self.user_id,
+            'user_name': (self.user.real_name or self.user.username) if self.user else None,
+            'department_id': self.department_id,
+            'department_name': self.department.department_name if self.department else None,
+            'reason': self.reason,
+            'starts_at': self.starts_at.isoformat() if self.starts_at else None,
+            'expires_at': self.expires_at.isoformat() if self.expires_at else None,
+            'revoked_at': self.revoked_at.isoformat() if self.revoked_at else None,
+            'active': self.is_active(),
+        }
+
+
+class LeadershipTransfer(db.Model):
+    """队长或部长交接，目标账户确认后生效。"""
+    __tablename__ = 'leadership_transfer'
+
+    transfer_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    role_name = db.Column(db.String(20), nullable=False)  # captain / minister
+    department_id = db.Column(db.Integer, db.ForeignKey('department.department_id', ondelete='SET NULL'))
+    from_user_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
+    to_user_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
+    status = db.Column(db.String(20), default='待确认', nullable=False)
+    note = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    responded_at = db.Column(db.DateTime)
+
+    department = db.relationship('Department')
+    from_user = db.relationship('User', foreign_keys=[from_user_id])
+    to_user = db.relationship('User', foreign_keys=[to_user_id])
+
+    def to_dict(self):
+        return {
+            'transfer_id': self.transfer_id, 'role_name': self.role_name,
+            'role_label': '队长' if self.role_name == 'captain' else '部长',
+            'department_id': self.department_id,
+            'department_name': self.department.department_name if self.department else None,
+            'from_user_id': self.from_user_id,
+            'from_user_name': (self.from_user.real_name or self.from_user.username) if self.from_user else None,
+            'to_user_id': self.to_user_id,
+            'to_user_name': (self.to_user.real_name or self.to_user.username) if self.to_user else None,
+            'status': self.status, 'note': self.note,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'responded_at': self.responded_at.isoformat() if self.responded_at else None,
+        }
+
+
+class ForumPost(db.Model):
+    """实名树洞论坛主题。"""
+    __tablename__ = 'forum_post'
+
+    post_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    author_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
+    title = db.Column(db.String(120), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    status = db.Column(db.SmallInteger, default=1, nullable=False)
+
+    author = db.relationship('User')
+    comments = db.relationship('ForumComment', back_populates='post', cascade='all, delete-orphan')
+
+    def to_dict(self, include_comments=True):
+        data = {
+            'post_id': self.post_id, 'author_id': self.author_id,
+            'author_name': (self.author.real_name or self.author.username) if self.author else None,
+            'author_username': self.author.username if self.author else None,
+            'title': self.title, 'content': self.content,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'comment_count': len(self.comments),
+        }
+        if include_comments:
+            data['comments'] = [row.to_dict() for row in self.comments]
+        return data
+
+
+class ForumComment(db.Model):
+    __tablename__ = 'forum_comment'
+
+    comment_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    post_id = db.Column(db.Integer, db.ForeignKey('forum_post.post_id', ondelete='CASCADE'), nullable=False)
+    author_id = db.Column(db.Integer, db.ForeignKey('user.user_id', ondelete='CASCADE'), nullable=False)
+    content = db.Column(db.String(1000), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    status = db.Column(db.SmallInteger, default=1, nullable=False)
+
+    post = db.relationship('ForumPost', back_populates='comments')
+    author = db.relationship('User')
+
+    def to_dict(self):
+        return {
+            'comment_id': self.comment_id, 'post_id': self.post_id,
+            'author_id': self.author_id,
+            'author_name': (self.author.real_name or self.author.username) if self.author else None,
+            'author_username': self.author.username if self.author else None,
+            'content': self.content,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }

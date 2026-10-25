@@ -11,7 +11,7 @@ from extensions import db
 from models import (
     ActivityMedia, ActivityParticipant, ClubActivity, ClubArchive, Department,
     Equipment, EquipmentCategory, EquipmentUsage, File, OperationRecord,
-    PointTransaction, Role, SocialAccount, User,
+    PointTransaction, Role, SocialAccount, TemporaryDepartmentGrant, User,
 )
 from utils.auth_helper import get_current_user, require_auth
 
@@ -72,9 +72,26 @@ def _is_minister(user, department_name=None):
     return department_name is None or (user.department and user.department.department_name == department_name)
 
 
+def _has_temporary_edit(user, department_name):
+    if not user:
+        return False
+    now = datetime.now()
+    return TemporaryDepartmentGrant.query.join(Department).filter(
+        TemporaryDepartmentGrant.user_id == user.user_id,
+        Department.department_name == department_name,
+        TemporaryDepartmentGrant.revoked_at.is_(None),
+        TemporaryDepartmentGrant.starts_at <= now,
+        TemporaryDepartmentGrant.expires_at > now,
+    ).first() is not None
+
+
+def _can_department_edit(user, department_name):
+    return _is_captain(user) or _is_minister(user, department_name) or _has_temporary_edit(user, department_name)
+
+
 def _can_manage_activity(user, activity):
     return bool(user and (_is_captain(user) or activity.lead_instructor_id == user.user_id or
-                          _is_minister(user, '教官部')))
+                          _can_department_edit(user, '教官部')))
 
 
 def _deny_unless(condition, message='权限不足'):
@@ -132,7 +149,7 @@ def departments():
 @require_auth
 def members():
     department_id = request.args.get('department_id', type=int)
-    query = User.query.filter_by(status=1)
+    query = User.query.filter(User.status.in_((1, 3)))
     if department_id:
         query = query.filter_by(department_id=department_id)
     rows = query.order_by(User.real_name, User.username).all()
@@ -147,7 +164,7 @@ def overview():
     pending_media = ActivityMedia.query.filter_by(review_status='待审阅').count()
     upcoming = ClubActivity.query.filter(ClubActivity.start_time >= now).order_by(ClubActivity.start_time).limit(4).all()
     return jsonify(
-        member_count=User.query.filter_by(status=1).count(),
+        member_count=User.query.filter(User.status.in_((1, 3))).count(),
         activity_count=ClubActivity.query.count(),
         upcoming_count=ClubActivity.query.filter(ClubActivity.start_time >= now).count(),
         equipment_count=db.session.query(func.sum(Equipment.total_quantity)).scalar() or 0,
@@ -285,7 +302,7 @@ def list_activities():
 @require_auth
 def create_activity():
     user = get_current_user()
-    denied = _deny_unless(_is_captain(user) or _is_minister(user, '教官部'), '仅教官部部长或队长可开设活动')
+    denied = _deny_unless(_can_department_edit(user, '教官部'), '仅教官部授权人员或队长可开设活动')
     if denied:
         return denied
     data = _payload()
@@ -549,9 +566,6 @@ def update_summary(activity_id):
 def submit_media(activity_id):
     user = get_current_user()
     activity = ClubActivity.query.get_or_404(activity_id)
-    denied = _deny_unless(_can_manage_activity(user, activity), '仅项目管理人员可提交活动素材')
-    if denied:
-        return denied
     data = request.get_json() or {}
     media_file = File.query.get(data.get('file_id'))
     if not media_file:
@@ -579,7 +593,7 @@ def equipment_categories():
         return jsonify(categories=[r.to_dict(include_children=True) for r in roots],
                        flat_categories=[r.to_dict() for r in flat]), 200
     user = get_current_user()
-    denied = _deny_unless(_is_captain(user) or _is_minister(user, '后勤部'), '仅后勤部部长或队长可新增分类')
+    denied = _deny_unless(_can_department_edit(user, '后勤部'), '仅后勤部授权人员或队长可新增分类')
     if denied:
         return denied
     data = request.get_json() or {}
@@ -605,7 +619,7 @@ def equipment_categories():
 @require_auth
 def manage_equipment_category(category_id):
     user = get_current_user()
-    denied = _deny_unless(_is_captain(user) or _is_minister(user, '后勤部'), '仅后勤部部长或队长可管理分类')
+    denied = _deny_unless(_can_department_edit(user, '后勤部'), '仅后勤部授权人员或队长可管理分类')
     if denied:
         return denied
     row = EquipmentCategory.query.get_or_404(category_id)
@@ -644,7 +658,7 @@ def equipment_list():
         rows = Equipment.query.order_by(Equipment.equipment_name).all()
         return jsonify(equipment=[r.to_dict() for r in rows]), 200
     user = get_current_user()
-    denied = _deny_unless(_is_captain(user) or _is_minister(user, '后勤部'), '仅后勤部部长或队长可登记设备')
+    denied = _deny_unless(_can_department_edit(user, '后勤部'), '仅后勤部授权人员或队长可登记设备')
     if denied:
         return denied
     data = _payload()
@@ -711,7 +725,7 @@ def borrow_equipment(equipment_id):
 def return_equipment(usage_id):
     user = get_current_user()
     row = EquipmentUsage.query.get_or_404(usage_id)
-    denied = _deny_unless(row.user_id == user.user_id or _is_captain(user) or _is_minister(user, '后勤部'), '无权归还该设备')
+    denied = _deny_unless(row.user_id == user.user_id or _can_department_edit(user, '后勤部'), '无权归还该设备')
     if denied:
         return denied
     if row.status != '使用中':
@@ -735,7 +749,7 @@ def socials():
         rows = SocialAccount.query.filter_by(status=1).all()
         return jsonify(accounts=[r.to_dict() for r in rows]), 200
     user = get_current_user()
-    denied = _deny_unless(_is_captain(user) or _is_minister(user, '综合办公室'), '仅综合办公室部长或队长可维护社媒账号')
+    denied = _deny_unless(_can_department_edit(user, '综合办公室'), '仅综合办公室授权人员或队长可维护社媒账号')
     if denied:
         return denied
     data = request.get_json() or {}
@@ -758,7 +772,7 @@ def archives():
         rows = ClubArchive.query.order_by(ClubArchive.archived_at.desc()).all()
         return jsonify(archives=[r.to_dict() for r in rows]), 200
     user = get_current_user()
-    denied = _deny_unless(_is_captain(user) or _is_minister(user, '综合办公室'), '仅综合办公室部长或队长可归档文件')
+    denied = _deny_unless(_can_department_edit(user, '综合办公室'), '仅综合办公室授权人员或队长可归档文件')
     if denied:
         return denied
     data = request.get_json() or {}
@@ -789,7 +803,7 @@ def review_queue():
 @require_auth
 def review_media(media_id):
     user = get_current_user()
-    denied = _deny_unless(_is_captain(user) or _is_minister(user, '综合办公室'), '仅综合办公室部长或队长可审阅素材')
+    denied = _deny_unless(_can_department_edit(user, '综合办公室'), '仅综合办公室授权人员或队长可审阅素材')
     if denied:
         return denied
     data = request.get_json() or {}

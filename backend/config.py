@@ -28,7 +28,7 @@ class Config:
     }
 
     # JWT
-    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt-secret-change-in-production')
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt-dev-secret-change-in-production-now')
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)
 
     # File upload

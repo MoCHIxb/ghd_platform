@@ -7,6 +7,7 @@ from extensions import db, jwt, cors
 from routes.auth       import auth_bp
 from routes.files      import files_bp
 from routes.club       import club_bp
+from routes.governance import governance_bp
 
 
 def create_app(config_class=Config):
@@ -23,7 +24,7 @@ def create_app(config_class=Config):
     cors.init_app(app, resources={r'/api/*': {'origins': '*'}})
 
     # 注册蓝图
-    for bp in (auth_bp, files_bp, club_bp):
+    for bp in (auth_bp, files_bp, club_bp, governance_bp):
         app.register_blueprint(bp)
 
     # 确保上传目录存在

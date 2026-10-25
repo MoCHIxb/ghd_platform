@@ -7,7 +7,7 @@ from datetime import datetime
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from werkzeug.utils import secure_filename
 from extensions import db
-from models import User, Role
+from models import MembershipRequest, User, Role
 from utils.auth_helper import require_auth, get_current_user
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
@@ -47,6 +47,7 @@ def register():
     username = (data.get('username') or '').strip()
     password = data.get('password') or ''
     email    = (data.get('email') or '').strip()
+    student_no = (data.get('student_no') or '').strip() or None
 
     if not username or not password or not email:
         return jsonify(msg='用户名、密码和邮箱不能为空'), 400
@@ -59,19 +60,26 @@ def register():
         return jsonify(msg='用户名已存在'), 409
     if User.query.filter_by(email=email).first():
         return jsonify(msg='邮箱已被注册'), 409
+    if student_no and User.query.filter_by(student_no=student_no).first():
+        return jsonify(msg='学号已被使用'), 409
 
     pw_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     user = User(username=username, password_hash=pw_hash, email=email,
                 real_name=(data.get('real_name') or '').strip() or None,
-                student_no=(data.get('student_no') or '').strip() or None,
-                department_id=data.get('department_id'))
+                student_no=student_no,
+                department_id=None, status=2)
     # 新注册账号默认赋予普通社员角色
     user_role = Role.query.filter_by(role_name='member').first()
     if user_role:
         user.roles.append(user_role)
     db.session.add(user)
+    db.session.flush()
+    db.session.add(MembershipRequest(
+        request_type='注册', user_id=user.user_id,
+        reason=(data.get('reason') or '').strip() or None,
+    ))
     db.session.commit()
-    return jsonify(msg='注册成功', user_id=user.user_id), 201
+    return jsonify(msg='注册申请已提交，请等待队长审核', user_id=user.user_id), 201
 
 
 @auth_bp.route('/login', methods=['POST'])
@@ -89,7 +97,9 @@ def login():
     if not bcrypt.checkpw(password.encode('utf-8'), user.password_hash.encode('utf-8')):
         return jsonify(msg='用户名或密码错误'), 401
     if user.status == 0:
-        return jsonify(msg='账号已被禁用，请联系管理员'), 403
+        return jsonify(msg='账号已注销或被停用，请联系队长'), 403
+    if user.status == 2:
+        return jsonify(msg='注册申请仍在等待队长审核'), 403
 
     user.last_login = datetime.now()
     db.session.commit()

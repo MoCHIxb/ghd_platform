@@ -42,8 +42,8 @@ def require_auth(f):
         except Exception:
             return jsonify(msg='请先登录'), 401
         user = User.query.get(uid)
-        if not user or user.status == 0:
-            return jsonify(msg='账号已被禁用'), 403
+        if not user or user.status not in (1, 3):
+            return jsonify(msg='账号尚未启用或已注销'), 403
         return f(*args, **kwargs)
     return decorated
 
@@ -62,8 +62,8 @@ def require_admin(f):
         except Exception:
             return jsonify(msg='请先登录'), 401
         user = User.query.get(uid)
-        if not user or user.status == 0:
-            return jsonify(msg='账号已被禁用'), 403
+        if not user or user.status not in (1, 3):
+            return jsonify(msg='账号尚未启用或已注销'), 403
         if not (user.has_role('admin') or user.has_role('captain')):
             return jsonify(msg='权限不足，需要管理员身份'), 403
         return f(*args, **kwargs)
@@ -82,8 +82,8 @@ def require_roles(*role_names):
                 return jsonify(msg='请先登录'), 401
             from models import User
             user = User.query.get(uid)
-            if not user or user.status == 0:
-                return jsonify(msg='账号已被禁用'), 403
+            if not user or user.status not in (1, 3):
+                return jsonify(msg='账号尚未启用或已注销'), 403
             allowed = set(role_names) | {'captain', 'admin'}
             if not any(user.has_role(name) for name in allowed):
                 return jsonify(msg='权限不足'), 403
